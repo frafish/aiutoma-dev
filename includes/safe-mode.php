@@ -16,6 +16,7 @@ class Safe_Mode {
         add_action('aiutoma_deactivated', [__CLASS__, 'cleanup']);
         add_action('aiutoma_site_error_detected', [__CLASS__, 'on_site_error']);
         add_action('aiutoma_site_healthy', [__CLASS__, 'on_site_healthy']);
+        add_action('aiutoma_playground_sidebar_bottom', [__CLASS__, 'render_sidebar_ui']);
 
         if (!self::is_active()) {
             self::enable();
@@ -190,4 +191,52 @@ class Safe_Mode {
             return new \WP_REST_Response(['success' => true, 'safe_mode' => true], 200);
         }
     }
+
+    public static function get_emergency_login_url() {
+        $safe_token = get_option('aiutoma_mcp_token');
+        if (empty($safe_token)) {
+            $safe_token = wp_generate_password(24, false);
+            update_option('aiutoma_mcp_token', $safe_token);
+        }
+        $playground_url = admin_url('admin.php?page=aiutoma');
+        return add_query_arg(['aiutoma_enforce_safe_mode' => '1', 'token' => $safe_token], wp_login_url($playground_url));
+    }
+
+    public static function render_sidebar_ui() {
+        $safe_mode_url = self::get_emergency_login_url();
+        $is_safe = self::is_ai_safe_active();
+        ?>
+        <div class="card aiutoma-safemode-card" style="display: none;">
+            <details>
+                <summary class="aiutoma-card-summary-wrap">
+                    <h2>
+                        <span class="dashicons dashicons-shield"></span>
+                        <?php esc_html_e('Safe Mode', 'aiutoma-dev'); ?>
+                    </h2>
+                </summary>
+                <div class="aiutoma-safemode-info" style="padding: 0 15px 15px 15px;">
+                    <p><?php esc_html_e('The Playground UI runs in a strictly isolated environment (Safe Mode). All other plugins and the active theme are temporarily disabled on this page to ensure maximum stability and prevent third-party fatal errors from crashing the chat.', 'aiutoma-dev'); ?></p>
+                    <p><strong><?php esc_html_e('AI Auto-Recovery:', 'aiutoma-dev'); ?></strong> <?php esc_html_e('By default, the AI executes tasks with ALL plugins loaded, so it can access WooCommerce, WPML, etc. freely. If a third-party plugin causes a Fatal Error (Error 500) during execution, the system will automatically enforce Strict Safe Mode on the AI to recover without breaking the chat.', 'aiutoma-dev'); ?></p>
+                    <p><strong><?php esc_html_e('Post-Task Verification:', 'aiutoma-dev'); ?></strong> <?php esc_html_e('After every critical task (like editing PHP or Database), the system verifies the frontend. If the site is broken, it immediately alerts the AI to fix it or prompts you to rollback.', 'aiutoma-dev'); ?></p>
+                    <div id="aiutoma-safemode-status-wrap" style="margin-top: 10px; padding: 10px; background: #f0f0f1; border-left: 4px solid #72aee6; display: flex; justify-content: space-between; align-items: center;">
+                        <div>
+                            <strong><?php esc_html_e('Current AI Status:', 'aiutoma-dev'); ?></strong> <span id="aiutoma-safemode-status"><?php echo $is_safe ? esc_html__('Strict Safe Mode Enforced (.aiutoma_safe)', 'aiutoma-dev') : esc_html__('Native (All Plugins Active)', 'aiutoma-dev'); ?></span>
+                        </div>
+                    </div>
+                </div>
+            </details>
+        </div>
+
+        <div class="notice notice-error inline" style="margin-left: 0; margin-top: 40px;">
+            <p><strong><?php esc_html_e('Emergency Safe Mode Login', 'aiutoma-dev'); ?>:</strong> <?php esc_html_e('If a plugin or theme causes a fatal 500 error that locks you out of the WordPress admin, use this URL to safely log in with all plugins/themes disabled:', 'aiutoma-dev'); ?></p>
+            <p style="background: #fff; padding: 10px; font-weight: bold; overflow-x: auto;">
+                <a href="<?php echo esc_url($safe_mode_url); ?>" target="_blank" style="text-decoration: none;">
+                    <?php echo esc_url($safe_mode_url); ?>
+                </a>
+            </p>
+            <p><em><?php esc_html_e('Save this URL somewhere safe. The unique token prevents bots from bypassing system protections (like Wordfence 2FA) by forcing safe mode.', 'aiutoma-dev'); ?></em></p>
+        </div>
+        <?php
+    }
 }
+

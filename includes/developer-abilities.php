@@ -8,6 +8,12 @@ if (!defined('ABSPATH')) {
 class Developer_Abilities {
 
     public static function register_all() {
+        static $registered = false;
+        if ($registered) {
+            return;
+        }
+        $registered = true;
+
         if (!class_exists('\Aiutoma\Modules\Ai\Abilities')) {
             return;
         }

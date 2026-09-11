@@ -62,7 +62,9 @@ add_action('aiutoma_register_abilities', function () {
 
 // Fallback hook for direct Abilities API initialization
 add_action('wp_abilities_api_init', function () {
-    \AiutomaDev\Includes\Developer_Abilities::register_all();
+    if (!did_action('aiutoma_register_abilities')) {
+        \AiutomaDev\Includes\Developer_Abilities::register_all();
+    }
 }, 20);
 
 // Enable PHP CodeMirror in Aiutoma Playground
