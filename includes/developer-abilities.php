@@ -22,6 +22,7 @@ class Developer_Abilities {
         self::register_run_wp_cli();
         self::register_modify_file();
         self::register_db_query();
+        self::register_dev_manage_users();
     }
 
     private static function register_execute_php() {
@@ -287,4 +288,177 @@ class Developer_Abilities {
             ]
         ]);
     }
+
+    private static function register_dev_manage_users() {
+        \Aiutoma\Modules\Ai\Abilities::register('aiutoma/dev-manage-users', [
+            'category' => 'aiutoma',
+            'label' => __('Manage Users & Roles (Dev)', 'aiutoma-dev'),
+            'meta' => [
+                'requires_confirmation' => true,
+                'mcp' => ['public' => true]
+            ],
+            'description' => __('Full developer user, role, and capability management. Allows creating users, updating user accounts/roles/passwords, deleting users, creating/removing custom roles, and adding/removing capabilities.', 'aiutoma-dev'),
+            'execute_callback' => function ($input) {
+                $action = $input['action'] ?? 'get_users';
+                $args = $input['args'] ?? [];
+
+                if ($action === 'get_users') {
+                    $users = get_users($args);
+                    $data = [];
+                    foreach ($users as $u) {
+                        $data[] = [
+                            'id' => $u->ID,
+                            'user_login' => $u->user_login,
+                            'display_name' => $u->display_name,
+                            'user_email' => $u->user_email,
+                            'user_nicename' => $u->user_nicename,
+                            'roles' => (array) $u->roles,
+                        ];
+                    }
+                    return ['success' => true, 'total' => count($data), 'users' => $data];
+                } elseif ($action === 'create_user') {
+                    if (!current_user_can('create_users')) {
+                        return new \WP_Error('unauthorized', __('You do not have permission to create users.', 'aiutoma-dev'));
+                    }
+                    require_once ABSPATH . 'wp-admin/includes/user.php';
+                    if (isset($args['role']) && $args['role'] === 'administrator' && !current_user_can('manage_options')) {
+                        return new \WP_Error('unauthorized', __('Only administrators can create administrator accounts.', 'aiutoma-dev'));
+                    }
+                    $user_id = wp_insert_user($args);
+                    if (is_wp_error($user_id)) {
+                        return $user_id;
+                    }
+                    return ['success' => true, 'user_id' => $user_id, 'message' => 'User created successfully.'];
+                } elseif ($action === 'update_user') {
+                    $user_id = intval($args['ID'] ?? ($args['id'] ?? ($args['user_id'] ?? 0)));
+                    if (!$user_id) {
+                        return new \WP_Error('missing_id', __('User ID is required.', 'aiutoma-dev'));
+                    }
+                    if (!current_user_can('edit_user', $user_id)) {
+                        return new \WP_Error('unauthorized', __('You do not have permission to edit this user.', 'aiutoma-dev'));
+                    }
+                    if (isset($args['role'])) {
+                        if (!current_user_can('promote_users')) {
+                            return new \WP_Error('unauthorized', __('You do not have permission to change user roles.', 'aiutoma-dev'));
+                        }
+                        if ($args['role'] === 'administrator' && !current_user_can('manage_options')) {
+                            return new \WP_Error('unauthorized', __('Only administrators can assign administrator role.', 'aiutoma-dev'));
+                        }
+                    }
+                    $args['ID'] = $user_id;
+                    $updated = wp_update_user($args);
+                    if (is_wp_error($updated)) {
+                        return $updated;
+                    }
+                    if (!empty($args['meta']) && is_array($args['meta'])) {
+                        foreach ($args['meta'] as $m_key => $m_val) {
+                            update_user_meta($user_id, sanitize_key($m_key), $m_val);
+                        }
+                    }
+                    return ['success' => true, 'user_id' => $user_id, 'message' => 'User updated successfully.'];
+                } elseif ($action === 'delete_user') {
+                    if (!current_user_can('delete_users')) {
+                        return new \WP_Error('unauthorized', __('You do not have permission to delete users.', 'aiutoma-dev'));
+                    }
+                    $user_id = intval($args['user_id'] ?? ($args['ID'] ?? ($args['id'] ?? 0)));
+                    if (!$user_id) {
+                        return new \WP_Error('missing_id', __('User ID is required.', 'aiutoma-dev'));
+                    }
+                    if ($user_id === get_current_user_id()) {
+                        return new \WP_Error('invalid_target', __('You cannot delete your own active user account.', 'aiutoma-dev'));
+                    }
+                    if (!current_user_can('delete_user', $user_id)) {
+                        return new \WP_Error('unauthorized', __('You do not have permission to delete this specific user.', 'aiutoma-dev'));
+                    }
+                    require_once ABSPATH . 'wp-admin/includes/user.php';
+                    $reassign = isset($args['reassign']) ? intval($args['reassign']) : null;
+                    $result = wp_delete_user($user_id, $reassign);
+                    if (!$result) {
+                        return new \WP_Error('delete_failed', __('Failed to delete user.', 'aiutoma-dev'));
+                    }
+                    return ['success' => true, 'message' => "User ID {$user_id} deleted successfully."];
+                } elseif ($action === 'set_user_role') {
+                    if (!current_user_can('promote_users')) {
+                        return new \WP_Error('unauthorized', __('You do not have permission to change user roles.', 'aiutoma-dev'));
+                    }
+                    $user_id = intval($args['user_id'] ?? ($args['ID'] ?? 0));
+                    $user = get_user_by('id', $user_id);
+                    if (!$user) {
+                        return new \WP_Error('user_not_found', __('User not found.', 'aiutoma-dev'));
+                    }
+                    $role = sanitize_key($args['role'] ?? '');
+                    if ($role === 'administrator' && !current_user_can('manage_options')) {
+                        return new \WP_Error('unauthorized', __('Only administrators can assign administrator role.', 'aiutoma-dev'));
+                    }
+                    $user->set_role($role);
+                    return ['success' => true, 'message' => "Role for user {$user_id} set to {$role}."];
+                } elseif ($action === 'add_role') {
+                    if (!current_user_can('manage_options')) {
+                        return new \WP_Error('unauthorized', __('Only administrators can create roles.', 'aiutoma-dev'));
+                    }
+                    if (empty($args['role']) || empty($args['display_name'])) {
+                        return new \WP_Error('missing_args', __('Role slug and display name are required.', 'aiutoma-dev'));
+                    }
+                    $role_slug = sanitize_key($args['role']);
+                    $display_name = sanitize_text_field($args['display_name']);
+                    $caps = isset($args['capabilities']) && is_array($args['capabilities']) ? $args['capabilities'] : [];
+                    $result = add_role($role_slug, $display_name, $caps);
+                    if (!$result) {
+                        return new \WP_Error('role_exists', __('Role already exists or could not be created.', 'aiutoma-dev'));
+                    }
+                    return ['success' => true, 'message' => "Role {$role_slug} created successfully."];
+                } elseif ($action === 'remove_role') {
+                    if (!current_user_can('manage_options')) {
+                        return new \WP_Error('unauthorized', __('Only administrators can delete roles.', 'aiutoma-dev'));
+                    }
+                    $role_slug = sanitize_key($args['role'] ?? '');
+                    if (in_array($role_slug, ['administrator'], true)) {
+                        return new \WP_Error('protected_role', __('The administrator role cannot be deleted.', 'aiutoma-dev'));
+                    }
+                    remove_role($role_slug);
+                    return ['success' => true, 'message' => "Role {$role_slug} removed."];
+                } elseif ($action === 'add_cap' || $action === 'remove_cap') {
+                    if (!current_user_can('manage_options')) {
+                        return new \WP_Error('unauthorized', __('Only administrators can modify capabilities.', 'aiutoma-dev'));
+                    }
+                    $role = get_role(sanitize_key($args['role'] ?? ''));
+                    if (!$role) {
+                        return new \WP_Error('invalid_role', __('Role not found.', 'aiutoma-dev'));
+                    }
+                    $cap = sanitize_key($args['cap'] ?? ($args['capability'] ?? ''));
+                    if (!$cap) {
+                        return new \WP_Error('missing_cap', __('Capability name is required.', 'aiutoma-dev'));
+                    }
+                    if ($action === 'add_cap') {
+                        $role->add_cap($cap);
+                        return ['success' => true, 'message' => "Capability {$cap} added to role {$args['role']}."];
+                    } else {
+                        $role->remove_cap($cap);
+                        return ['success' => true, 'message' => "Capability {$cap} removed from role {$args['role']}."];
+                    }
+                }
+
+                return new \WP_Error('invalid_action', __('Unsupported action.', 'aiutoma-dev'));
+            },
+            'permission_callback' => function () {
+                return current_user_can('manage_options') || current_user_can('promote_users');
+            },
+            'input_schema' => [
+                'type' => 'object',
+                'properties' => [
+                    'action' => [
+                        'type' => 'string',
+                        'enum' => ['get_users', 'create_user', 'update_user', 'delete_user', 'set_user_role', 'add_role', 'remove_role', 'add_cap', 'remove_cap'],
+                        'description' => 'Action to perform: get_users, create_user, update_user, delete_user, set_user_role, add_role, remove_role, add_cap, remove_cap.'
+                    ],
+                    'args' => [
+                        'type' => 'object',
+                        'description' => 'Arguments for the action. For create_user: {"user_login":"name", "user_email":"a@b.com", "role":"editor"}. For update_user: {"ID":2, "role":"author"}. For delete_user: {"user_id":2, "reassign":1}. For add_role: {"role":"manager", "display_name":"Manager"}. For add_cap: {"role":"manager", "cap":"edit_posts"}.'
+                    ]
+                ],
+                'required' => ['action']
+            ]
+        ]);
+    }
 }
+
