@@ -8,9 +8,15 @@ if (!defined('ABSPATH')) {
 class Safe_Mode {
 
     public static function init() {
+        add_action('rest_api_init', [__CLASS__, 'register_rest_route']);
+        add_action('aiutoma_playground_toolbar_actions', [__CLASS__, 'render_toolbar_button']);
+        add_action('admin_enqueue_scripts', [__CLASS__, 'enqueue_assets']);
+        add_action('aiutoma_settings_table_rows', [__CLASS__, 'render_settings_row']);
+        add_filter('aiutoma_chat_tool_instructions', [__CLASS__, 'filter_chat_instructions']);
+        add_filter('aiutoma_playground_settings', [__CLASS__, 'filter_playground_settings']);
+
         add_filter('aiutoma_enable_safe_mode_ui', '__return_true');
         add_filter('aiutoma_is_safe_mode_active', [__CLASS__, 'is_ai_safe_active']);
-        add_filter('aiutoma_toggle_safe_mode_response', [__CLASS__, 'handle_toggle_response'], 10, 2);
         add_action('aiutoma_enable_safe_mode', [__CLASS__, 'enable']);
         add_action('aiutoma_disable_safe_mode', [__CLASS__, 'disable']);
         add_action('aiutoma_deactivated', [__CLASS__, 'cleanup']);
@@ -21,6 +27,58 @@ class Safe_Mode {
         if (!self::is_active()) {
             self::enable();
         }
+    }
+
+    public static function register_rest_route() {
+        register_rest_route('aiutoma/v1', '/toggle-safe-mode', [
+            'methods' => 'POST',
+            'callback' => [__CLASS__, 'handle_toggle_response'],
+            'permission_callback' => function () {
+                return current_user_can('manage_options');
+            }
+        ]);
+    }
+
+    public static function render_toolbar_button() {
+        $is_safe = self::is_ai_safe_active();
+        ?>
+        <button type="button" id="aiutoma-toggle-safe-mode" class="button button-secondary aiutoma-session-btn <?php echo $is_safe ? 'aiutoma-safe-mode-active' : ''; ?>" title="<?php esc_attr_e('Toggle AI Safe Mode', 'aiutoma-dev'); ?>" data-active="<?php echo $is_safe ? '1' : '0'; ?>">
+            <span class="dashicons dashicons-shield"></span>
+        </button>
+        <?php
+    }
+
+    public static function enqueue_assets($hook) {
+        if (strpos($hook, 'aiutoma') !== false || (isset($_GET['page']) && sanitize_text_field(wp_unslash($_GET['page'])) === 'aiutoma')) {
+            wp_enqueue_style('aiutoma-dev-safe-mode', AIUTOMA_DEV_URL . 'assets/css/dev-safe-mode.css', [], AIUTOMA_DEV_VERSION);
+            wp_enqueue_script('aiutoma-dev-safe-mode', AIUTOMA_DEV_URL . 'assets/js/dev-safe-mode.js', ['jquery'], AIUTOMA_DEV_VERSION, true);
+        }
+    }
+
+    public static function render_settings_row() {
+        ?>
+        <tr>
+            <th scope="row"><?php esc_html_e('Developer Mode', 'aiutoma-dev'); ?></th>
+            <td>
+                <p style="color: #00a32a; font-weight: 600;">
+                    <span class="dashicons dashicons-yes-alt"></span>
+                    <?php printf(esc_html__('Developer Mode is active (v%s).', 'aiutoma-dev'), esc_html(AIUTOMA_DEV_VERSION)); ?>
+                </p>
+                <p class="description"><?php esc_html_e('Developer abilities are unlocked with interactive review and rollbacks.', 'aiutoma-dev'); ?></p>
+            </td>
+        </tr>
+        <?php
+    }
+
+    public static function filter_chat_instructions($default_instructions) {
+        return "Developer tools (execute-php, modify-file, run-wp-cli) are active; use them when needed for custom code execution or file edits after user confirmation. ";
+    }
+
+    public static function filter_playground_settings($settings) {
+        if (is_array($settings)) {
+            $settings['hasDevExtension'] = true;
+        }
+        return $settings;
     }
 
     public static function get_mu_plugin_path() {
@@ -171,9 +229,10 @@ class Safe_Mode {
         }
     }
 
-    public static function handle_toggle_response($response, $request) {
+    public static function handle_toggle_response($request_or_response = null, $maybe_request = null) {
+        $request = ($maybe_request instanceof \WP_REST_Request) ? $maybe_request : (($request_or_response instanceof \WP_REST_Request) ? $request_or_response : null);
         $flag_file = ABSPATH . '.aiutoma_safe';
-        $force = $request->get_param('force');
+        $force = ($request && method_exists($request, 'get_param')) ? $request->get_param('force') : null;
 
         if ($force === 'enable') {
             file_put_contents($flag_file, '1');

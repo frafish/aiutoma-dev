@@ -1,0 +1,17 @@
+.aiutoma-safe-mode-active {
+    background: #e6f2ff !important;
+    border-color: #2271b1 !important;
+}
+
+.aiutoma-safe-mode-active .dashicons {
+    color: #2271b1;
+}
+
+.aiutoma-safe-mode-notice {
+    background: #e6f2ff;
+    border-left: 4px solid #2271b1;
+    padding: 8px 12px;
+    margin-bottom: 10px;
+    border-radius: 3px;
+}
+

@@ -25,6 +25,10 @@ class Developer_Abilities {
         self::register_dev_manage_users();
         self::register_scaffold_theme();
         self::register_create_pdf();
+        self::register_read_file();
+        self::register_list_directory();
+        self::register_manage_plugins();
+        self::register_manage_themes();
     }
 
     private static function register_execute_php() {
@@ -1181,5 +1185,473 @@ add_action( 'after_setup_theme', function () {
             ]
         ]);
     }
+
+    private static function register_read_file() {
+        \Aiutoma\Modules\Ai\Abilities::register('aiutoma/read-file', [
+            'category' => 'aiutoma',
+            'label' => __('Read File', 'aiutoma-dev'),
+            'meta' => [
+                'requires_confirmation' => false,
+                'mcp' => ['public' => true]
+            ],
+            'description' => __('Read a file from the server.', 'aiutoma-dev'),
+            'execute_callback' => function ($input) {
+                $path = $input['path'];
+                if (!file_exists($path)) {
+                    return new \WP_Error('file_error', 'File not found: ' . $path);
+                }
+                $content = file_get_contents($path);
+                if ($content === false) {
+                    return new \WP_Error('file_error', 'Failed to read file: ' . $path);
+                }
+                return ['success' => true, 'content' => $content];
+            },
+            'permission_callback' => function () {
+                return current_user_can('manage_options');
+            },
+            'input_schema' => [
+                'type' => 'object',
+                'properties' => [
+                    'path' => ['type' => 'string', 'description' => 'Absolute file path']
+                ],
+                'required' => ['path']
+            ]
+        ]);
+    }
+
+    private static function register_list_directory() {
+        \Aiutoma\Modules\Ai\Abilities::register('aiutoma/list-directory', [
+            'category' => 'aiutoma',
+            'label' => __('List Directory', 'aiutoma-dev'),
+            'meta' => [
+                'requires_confirmation' => false,
+                'mcp' => ['public' => true]
+            ],
+            'description' => __('List files and folders in a directory.', 'aiutoma-dev'),
+            'execute_callback' => function ($input) {
+                $path = $input['path'];
+                if (!is_dir($path)) {
+                    return new \WP_Error('dir_error', 'Directory not found: ' . $path);
+                }
+                $files = scandir($path);
+                if ($files === false) {
+                    return new \WP_Error('dir_error', 'Failed to read directory: ' . $path);
+                }
+                return ['success' => true, 'files' => array_values(array_diff($files, ['.', '..']))];
+            },
+            'permission_callback' => function () {
+                return current_user_can('manage_options');
+            },
+            'input_schema' => [
+                'type' => 'object',
+                'properties' => [
+                    'path' => ['type' => 'string', 'description' => 'Absolute directory path']
+                ],
+                'required' => ['path']
+            ]
+        ]);
+    }
+
+    private static function register_manage_plugins() {
+        \Aiutoma\Modules\Ai\Abilities::register('aiutoma/manage-plugins', [
+            'category' => 'aiutoma',
+            'label' => __('Manage Plugins', 'aiutoma-dev'),
+            'meta' => [
+                'requires_confirmation' => true,
+                'mcp' => ['public' => true]
+            ],
+            'description' => __('Manage WordPress plugins safely (list, install, activate, deactivate, delete).', 'aiutoma-dev'),
+            'execute_callback' => function ($input) {
+                if (!function_exists('get_plugins')) {
+                    require_once ABSPATH . 'wp-admin/includes/plugin.php';
+                }
+
+                $action = $input['action'];
+                $slug = isset($input['slug']) ? sanitize_text_field($input['slug']) : '';
+
+                if ($action === 'list') {
+                    $all_plugins = get_plugins();
+                    $active_plugins = get_option('active_plugins', []);
+                    $data = [];
+                    foreach ($all_plugins as $path => $info) {
+                        $data[] = [
+                            'path' => $path,
+                            'name' => $info['Name'],
+                            'version' => $info['Version'],
+                            'status' => in_array($path, $active_plugins) ? 'active' : 'inactive'
+                        ];
+                    }
+                    return ['success' => true, 'plugins' => $data];
+                }
+
+                if (empty($slug)) {
+                    return new \WP_Error('missing_slug', 'Plugin slug/path is required for this action.');
+                }
+
+                $plugin_file = $slug;
+                if (strpos($plugin_file, '.php') === false && $action !== 'install') {
+                    $plugins = get_plugins();
+                    foreach ($plugins as $path => $p) {
+                        if (strpos($path, $slug . '/') === 0 || $path === $slug . '.php') {
+                            $plugin_file = $path;
+                            break;
+                        }
+                    }
+                }
+
+                if ($action === 'activate') {
+                    $result = activate_plugin($plugin_file);
+                    if (is_wp_error($result)) return $result;
+                    return ['success' => true, 'message' => "Plugin $plugin_file activated."];
+                } elseif ($action === 'deactivate') {
+                    deactivate_plugins($plugin_file);
+                    return ['success' => true, 'message' => "Plugin $plugin_file deactivated."];
+                } elseif ($action === 'delete') {
+                    deactivate_plugins($plugin_file);
+                    $result = delete_plugins([$plugin_file]);
+                    if (is_wp_error($result)) return $result;
+                    return ['success' => true, 'message' => "Plugin $plugin_file deleted."];
+                } elseif ($action === 'install' || $action === 'update' || $action === 'rollback') {
+                    include_once ABSPATH . 'wp-admin/includes/plugin-install.php';
+                    include_once ABSPATH . 'wp-admin/includes/file.php';
+                    include_once ABSPATH . 'wp-admin/includes/class-wp-upgrader.php';
+                    include_once ABSPATH . 'wp-admin/includes/class-automatic-upgrader-skin.php';
+
+                    if ($action === 'update' && empty($input['version'])) {
+                        $upgrader = new \Plugin_Upgrader(new \Automatic_Upgrader_Skin());
+                        $result = $upgrader->upgrade($plugin_file);
+                        if (is_wp_error($result) || $result === false) {
+                            return new \WP_Error('update_failed', 'Failed to update plugin.');
+                        }
+                        return ['success' => true, 'message' => "Plugin $plugin_file updated successfully."];
+                    }
+
+                    $api = plugins_api('plugin_information', ['slug' => $slug]);
+                    if (is_wp_error($api)) return $api;
+
+                    $download_link = $api->download_link;
+                    $version = $input['version'] ?? '';
+
+                    if ($action === 'rollback' || (!empty($version) && $action === 'update')) {
+                        if (empty($version)) return new \WP_Error('missing_version', 'Version is required for rollback.');
+                        if (!isset($api->versions) || !isset($api->versions[$version])) {
+                            return new \WP_Error('invalid_version', "Version $version not found in WordPress repository for $slug.");
+                        }
+                        $download_link = $api->versions[$version];
+                    }
+
+                    $upgrader = new \Plugin_Upgrader(new \Automatic_Upgrader_Skin());
+                    $install_args = [];
+                    if ($action === 'rollback' || $action === 'update') {
+                        $install_args['clear_destination'] = true;
+                    }
+
+                    $result = $upgrader->install($download_link, $install_args);
+
+                    if (is_wp_error($result) || $result === false) {
+                        return new \WP_Error('action_failed', "Failed to $action plugin.");
+                    }
+                    return ['success' => true, 'message' => "Plugin $slug successfully processed ($action" . (!empty($version) ? " to version $version" : "") . ")."];
+                }
+
+                return new \WP_Error('invalid_action', 'Unsupported action.');
+            },
+            'permission_callback' => function () {
+                return current_user_can('activate_plugins');
+            },
+            'input_schema' => [
+                'type' => 'object',
+                'properties' => [
+                    'action' => ['type' => 'string', 'enum' => ['list', 'install', 'activate', 'deactivate', 'delete', 'update', 'rollback'], 'description' => 'Action to perform'],
+                    'slug' => ['type' => 'string', 'description' => 'Plugin directory slug (e.g., "woocommerce") or full path (e.g., "woocommerce/woocommerce.php"). Not needed for list action.'],
+                    'version' => ['type' => 'string', 'description' => 'Specific version to rollback/update to.']
+                ],
+                'required' => ['action']
+            ]
+        ]);
+    }
+
+    private static function register_manage_themes() {
+        \Aiutoma\Modules\Ai\Abilities::register('aiutoma/manage-themes', [
+            'category' => 'aiutoma',
+            'label' => __('Manage Themes', 'aiutoma-dev'),
+            'meta' => [
+                'requires_confirmation' => true,
+                'mcp' => ['public' => true]
+            ],
+            'description' => __('Manage WordPress themes safely (list, activate).', 'aiutoma-dev'),
+            'execute_callback' => function ($input) {
+                $action = $input['action'];
+                $slug = isset($input['slug']) ? sanitize_text_field($input['slug']) : '';
+
+                if ($action === 'list') {
+                    $themes = wp_get_themes();
+                    $active = wp_get_theme()->get_stylesheet();
+                    $data = [];
+                    foreach ($themes as $stylesheet => $theme) {
+                        $data[] = [
+                            'slug' => $stylesheet,
+                            'name' => $theme->get('Name'),
+                            'version' => $theme->get('Version'),
+                            'status' => ($stylesheet === $active) ? 'active' : 'inactive'
+                        ];
+                    }
+                    return ['success' => true, 'themes' => $data];
+                } elseif ($action === 'activate') {
+                    if (empty($slug)) return new \WP_Error('missing_slug', 'Theme slug is required.');
+                    switch_theme($slug);
+                    return ['success' => true, 'message' => "Theme $slug activated."];
+                }
+                return new \WP_Error('invalid_action', 'Unsupported action.');
+            },
+            'permission_callback' => function () {
+                return current_user_can('switch_themes');
+            },
+            'input_schema' => [
+                'type' => 'object',
+                'properties' => [
+                    'action' => ['type' => 'string', 'enum' => ['list', 'activate'], 'description' => 'Action to perform'],
+                    'slug' => ['type' => 'string', 'description' => 'Theme slug. Not needed for list action.']
+                ],
+                'required' => ['action']
+            ]
+        ]);
+    }
+
+    public static function handle_rollback($handled, $data, $backup_file) {
+        if (!is_array($data) || empty($data['action'])) {
+            return $handled;
+        }
+
+        if ($data['action'] === 'db-query') {
+            global $wpdb;
+            $table = $data['table'] ?? '';
+            if (!empty($data['rows']) && is_array($data['rows'])) {
+                if (($data['type'] ?? '') === 'UPDATE') {
+                    foreach ($data['rows'] as $row) {
+                        $common_pks = ['ID', 'id', 'post_id', 'meta_id', 'umeta_id', 'term_id', 'option_id', 'comment_ID'];
+                        $pk = array_key_first($row);
+                        foreach ($common_pks as $p) {
+                            if (isset($row[$p])) {
+                                $pk = $p;
+                                break;
+                            }
+                        }
+                        if ($pk) {
+                            $wpdb->update($table, $row, [$pk => $row[$pk]]);
+                        }
+                    }
+                } elseif (($data['type'] ?? '') === 'DELETE') {
+                    foreach ($data['rows'] as $row) {
+                        $wpdb->insert($table, $row);
+                    }
+                }
+            }
+            return true;
+        }
+
+        if ($data['action'] === 'execute-php-rollback' || $data['action'] === 'global-rollback' || $data['action'] === 'cron-rollback') {
+            if (!empty($data['options'])) {
+                foreach ($data['options'] as $opt => $val) {
+                    if ($val === false) delete_option($opt);
+                    else update_option($opt, $val);
+                }
+            }
+            if (!empty($data['posts'])) {
+                foreach ($data['posts'] as $post_id => $post_data) {
+                    if (is_array($post_data)) {
+                        wp_update_post($post_data);
+                    } elseif (is_object($post_data)) {
+                        wp_update_post(get_object_vars($post_data));
+                    }
+                }
+            }
+            if (!empty($data['db_changes'])) {
+                global $wpdb;
+                foreach ($data['db_changes'] as $change) {
+                    $table = $change['table'];
+                    $type = $change['type'];
+                    if ($type === 'UPDATE') {
+                        foreach ($change['rows'] as $row) {
+                            $common_pks = ['ID', 'id', 'post_id', 'meta_id', 'umeta_id', 'term_id', 'option_id', 'comment_ID'];
+                            $pk = array_key_first($row);
+                            foreach ($common_pks as $p) {
+                                if (isset($row[$p])) {
+                                    $pk = $p;
+                                    break;
+                                }
+                            }
+                            if ($pk) {
+                                $wpdb->update($table, $row, [$pk => $row[$pk]]);
+                            }
+                        }
+                    } elseif ($type === 'DELETE') {
+                        foreach ($change['rows'] as $row) {
+                            $wpdb->insert($table, $row);
+                        }
+                    }
+                }
+            }
+            return true;
+        }
+
+        return $handled;
+    }
+
+    public static function display_backup_item($item, $data, $filename) {
+        if (!is_array($data) || empty($data['action'])) {
+            return $item;
+        }
+
+        $desc = '';
+        $extra_html = '';
+
+        if ($data['action'] === 'modify-file') {
+            $content_base = defined('WP_CONTENT_DIR') ? constant('WP_CONTENT_DIR') : dirname(wp_upload_dir()['basedir']);
+            $rel_path = str_replace(wp_normalize_path($content_base), '', wp_normalize_path($data['original_path'] ?? ''));
+            $desc = 'Modified file: ' . ltrim($rel_path, '/');
+        } elseif ($data['action'] === 'db-query') {
+            $desc = 'DB ' . ($data['type'] ?? '') . ' on table: ' . ($data['table'] ?? '');
+            if (!empty($data['query'])) {
+                $extra_html .= '<li><strong>Query:</strong> <code>' . esc_html(strlen($data['query']) > 100 ? substr($data['query'], 0, 100) . '...' : $data['query']) . '</code></li>';
+            }
+        } elseif ($data['action'] === 'execute-php-rollback') {
+            $details = [];
+            if (!empty($data['files'])) {
+                $details[] = count($data['files']) . ' files';
+                $file_links = [];
+                foreach ($data['files'] as $i => $f) {
+                    $base = basename($f['path']);
+                    if (!empty($f['is_new'])) {
+                        $file_links[] = esc_html($base) . ' (New)';
+                    } else {
+                        $dl_url = rest_url('aiutoma/v1/download-ai-backup?id=' . $filename . '&type=file&index=' . $i . '&_wpnonce=' . wp_create_nonce('wp_rest'));
+                        $file_links[] = esc_html($base) . ' <a href="' . esc_url($dl_url) . '" target="_blank" title="Download Original">(Download)</a>';
+                    }
+                }
+                $extra_html .= '<li><strong>Files:</strong> ' . implode(', ', $file_links) . '</li>';
+            }
+            if (!empty($data['db_changes'])) {
+                $details[] = count($data['db_changes']) . ' DB changes';
+                $tables = array_unique(array_column($data['db_changes'], 'table'));
+                $dl_url = rest_url('aiutoma/v1/download-ai-backup?id=' . $filename . '&type=sql&_wpnonce=' . wp_create_nonce('wp_rest'));
+                $extra_html .= '<li><strong>Tables:</strong> ' . esc_html(implode(', ', $tables)) . ' <a href="' . esc_url($dl_url) . '" target="_blank" title="Download SQL Dump">(Download SQL)</a></li>';
+            }
+            if (!empty($data['options'])) {
+                $details[] = count($data['options']) . ' options';
+                $extra_html .= '<li><strong>Options:</strong> ' . esc_html(implode(', ', array_keys($data['options']))) . '</li>';
+            }
+            if (!empty($data['posts'])) {
+                $details[] = count($data['posts']) . ' posts';
+                $extra_html .= '<li><strong>Posts:</strong> ' . esc_html(implode(', ', array_keys($data['posts']))) . '</li>';
+            }
+            $desc = 'AI Action Rollback' . (!empty($details) ? ' (' . implode(', ', $details) . ')' : '');
+        } elseif ($data['action'] === 'plugin-backup') {
+            $desc = 'Plugin Backup: ' . esc_html($data['slug'] ?? '');
+            if (!empty($data['zip_path'])) {
+                $extra_html .= '<li><strong>File:</strong> ' . esc_html(basename($data['zip_path'])) . '</li>';
+            }
+        }
+
+        if ($desc) {
+            return [
+                'desc' => $desc,
+                'extra_html' => $extra_html
+            ];
+        }
+
+        return $item;
+    }
+
+    public static function register_rest_routes() {
+        register_rest_route('aiutoma/v1', '/download-ai-backup', [
+            'methods' => 'GET',
+            'callback' => [__CLASS__, 'download_ai_backup'],
+            'permission_callback' => function () {
+                return current_user_can('manage_options');
+            }
+        ]);
+    }
+
+    public static function download_ai_backup($request) {
+        $backup_id = $request->get_param('id');
+        $type = $request->get_param('type'); // 'file' or 'sql'
+        $index = (int)$request->get_param('index');
+
+        if (!$backup_id || !$type) {
+            return new \WP_Error('invalid_params', 'Missing required parameters.', ['status' => 400]);
+        }
+
+        $upload_dir = wp_upload_dir();
+        $backup_dir = class_exists('\Aiutoma\Modules\Ai\Ai') ? \Aiutoma\Modules\Ai\Ai::get_storage_dir() . '/backup' : $upload_dir['basedir'] . '/aiutoma/backup';
+        $json_file = $backup_dir . '/' . basename($backup_id);
+
+        if (!file_exists($json_file)) {
+            return new \WP_Error('not_found', 'Backup not found.', ['status' => 404]);
+        }
+
+        $data = json_decode(file_get_contents($json_file), true);
+        if (!$data) {
+            return new \WP_Error('invalid_backup', 'Invalid backup file.', ['status' => 500]);
+        }
+
+        if ($type === 'file') {
+            if (!isset($data['files'][$index])) {
+                return new \WP_Error('not_found', 'File backup not found.', ['status' => 404]);
+            }
+            $file_info = $data['files'][$index];
+            if (!empty($file_info['is_new'])) {
+                return new \WP_Error('not_found', 'This file was created by AI, no previous version exists.', ['status' => 404]);
+            }
+            $physical = $backup_dir . '/' . basename($file_info['physical_backup']);
+            if (!file_exists($physical)) {
+                return new \WP_Error('not_found', 'Physical backup file not found.', ['status' => 404]);
+            }
+
+            header('Content-Type: application/octet-stream');
+            header('Content-Disposition: attachment; filename="' . basename($file_info['path']) . '"');
+            header('Content-Length: ' . filesize($physical));
+            // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_readfile
+            readfile($physical);
+            exit;
+        } elseif ($type === 'sql') {
+            if (!isset($data['db_changes'])) {
+                return new \WP_Error('not_found', 'No DB changes in this backup.', ['status' => 404]);
+            }
+
+            $sql_dump = "-- AI Action Rollback SQL Dump\n";
+            $sql_dump .= "-- Original Backup ID: " . $backup_id . "\n\n";
+
+            foreach ($data['db_changes'] as $change) {
+                if ($change['type'] === 'UPDATE' || $change['type'] === 'DELETE' || $change['type'] === 'INSERT') {
+                    $table = $change['table'];
+                    $sql_dump .= "-- Restore original rows for table: {$table}\n";
+                    if (!empty($change['rows'])) {
+                        foreach ($change['rows'] as $row) {
+                            $cols = array_keys($row);
+                            $vals = array_map(function ($v) {
+                                if ($v === null) return 'NULL';
+                                return "'" . esc_sql($v) . "'";
+                            }, array_values($row));
+                            $sql_dump .= "REPLACE INTO `{$table}` (`" . implode("`, `", $cols) . "`) VALUES (" . implode(", ", $vals) . ");\n";
+                        }
+                    }
+                    $sql_dump .= "\n";
+                }
+            }
+
+            header('Content-Type: text/plain');
+            header('Content-Disposition: attachment; filename="rollback_' . $backup_id . '.sql"');
+            echo $sql_dump;
+            exit;
+        }
+
+        return new \WP_Error('invalid_type', 'Invalid download type.', ['status' => 400]);
+    }
 }
+
+add_filter('aiutoma_handle_custom_rollback', ['\\AiutomaDev\\Includes\\Developer_Abilities', 'handle_rollback'], 10, 3);
+add_filter('aiutoma_backup_item_display', ['\\AiutomaDev\\Includes\\Developer_Abilities', 'display_backup_item'], 10, 3);
+add_action('rest_api_init', ['\\AiutomaDev\\Includes\\Developer_Abilities', 'register_rest_routes']);
+
 
