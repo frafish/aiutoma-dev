@@ -218,6 +218,80 @@ class Developer_Abilities {
         return null;
     }
 
+    /**
+     * Find a valid PHP CLI binary, supporting Plesk, cPanel, Docker, custom path, or standard system paths.
+     *
+     * @param string|null $custom_path Optional custom path from input.
+     * @return string|null Path to executable PHP binary or null if none found.
+     */
+    public static function find_php_cli_binary(?string $custom_path = null): ?string {
+        if (!empty($custom_path) && is_string($custom_path) && is_file($custom_path) && is_executable($custom_path)) {
+            return $custom_path;
+        }
+
+        if (defined('AIUTOMA_PHP_PATH') && is_string(AIUTOMA_PHP_PATH) && is_file(AIUTOMA_PHP_PATH) && is_executable(AIUTOMA_PHP_PATH)) {
+            return AIUTOMA_PHP_PATH;
+        }
+
+        $option_path = get_option('aiutoma_dev_php_path');
+        if (!empty($option_path) && is_string($option_path) && is_file($option_path) && is_executable($option_path)) {
+            return $option_path;
+        }
+
+        $filtered = apply_filters('aiutoma_php_binary_path', null);
+        if (!empty($filtered) && is_string($filtered) && is_file($filtered) && is_executable($filtered)) {
+            return $filtered;
+        }
+
+        // Check PHP_BINARY
+        if (defined('PHP_BINARY') && !empty(PHP_BINARY)) {
+            $bin = PHP_BINARY;
+            if (basename($bin) === 'php' && is_executable($bin)) {
+                return $bin;
+            }
+            // In FPM/CGI environments, PHP_BINARY may point to php-fpm or php-cgi in sbin or bin
+            $cli_candidate = preg_replace('#/(s?bin)/(php-fpm[0-9.]*|php-cgi[0-9.]*)$#', '/bin/php', $bin);
+            if ($cli_candidate && is_file($cli_candidate) && is_executable($cli_candidate)) {
+                return $cli_candidate;
+            }
+        }
+
+        // Build version strings for Plesk / cPanel
+        $v_major_minor = PHP_MAJOR_VERSION . '.' . PHP_MINOR_VERSION;
+        $version_candidates = array_unique([$v_major_minor, '8.4', '8.3', '8.2', '8.1', '8.0', '7.4']);
+
+        $plesk_cpanel_paths = [];
+        foreach ($version_candidates as $v) {
+            $plesk_cpanel_paths[] = "/opt/plesk/php/{$v}/bin/php";
+            $nodot = str_replace('.', '', $v);
+            $plesk_cpanel_paths[] = "/opt/cpanel/ea-php{$nodot}/root/usr/bin/php";
+        }
+
+        $standard_paths = [
+            '/usr/bin/php',
+            '/usr/local/bin/php',
+            '/bin/php',
+        ];
+
+        $all_paths = array_merge($plesk_cpanel_paths, $standard_paths);
+        foreach ($all_paths as $path) {
+            if (is_file($path) && is_executable($path)) {
+                return $path;
+            }
+        }
+
+        if (function_exists('exec')) {
+            $output = [];
+            $return_var = 0;
+            exec('which php 2>/dev/null', $output, $return_var);
+            if ($return_var === 0 && !empty($output[0]) && is_executable(trim($output[0]))) {
+                return trim($output[0]);
+            }
+        }
+
+        return null;
+    }
+
     private static function find_wp_cli_binary() {
         $common_paths = [
             '/usr/local/bin/wp',
@@ -283,12 +357,25 @@ class Developer_Abilities {
                     array_unshift($args, '--allow-root');
                 }
 
-                $cmd_args = array_map('escapeshellarg', $args);
-                $executable = str_ends_with($wp_path, '.phar')
-                    ? escapeshellcmd(PHP_BINARY) . ' ' . escapeshellarg($wp_path)
-                    : escapeshellarg($wp_path);
+                $php_path_arg = !empty($input['php_path']) && is_string($input['php_path']) ? trim($input['php_path']) : null;
+                $php_binary = self::find_php_cli_binary($php_path_arg);
 
-                $cmd = $executable . ' ' . implode(' ', $cmd_args) . ' 2>&1';
+                $cmd_args = array_map('escapeshellarg', $args);
+
+                // Build execution command: always invoke through the detected PHP CLI binary if available
+                // to prevent '/usr/bin/env: php: No such file or directory' errors on Plesk/cPanel web servers.
+                $php_dir = $php_binary ? dirname($php_binary) : '';
+                $path_prefix = ($php_dir && $php_dir !== '/usr/bin' && $php_dir !== '/bin')
+                    ? 'PATH=' . escapeshellarg($php_dir) . ':$PATH '
+                    : '';
+
+                if ($php_binary) {
+                    $executable = escapeshellcmd($php_binary) . ' ' . escapeshellarg($wp_path);
+                } else {
+                    $executable = escapeshellarg($wp_path);
+                }
+
+                $cmd = $path_prefix . $executable . ' ' . implode(' ', $cmd_args) . ' 2>&1';
 
                 $output = [];
                 $return_var = 0;
@@ -323,6 +410,10 @@ class Developer_Abilities {
                         'type' => 'array',
                         'description' => 'Legacy array of arguments to pass to wp (e.g. ["plugin", "list", "--format=json"]).',
                         'items' => ['type' => 'string']
+                    ],
+                    'php_path' => [
+                        'type' => 'string',
+                        'description' => 'Optional custom path to the PHP CLI executable (e.g. "/opt/plesk/php/8.2/bin/php"). If omitted, AIUTOMA automatically resolves it.'
                     ],
                     'nameOrPath' => [
                         'type' => 'string',
