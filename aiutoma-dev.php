@@ -33,6 +33,8 @@ require_once AIUTOMA_DEV_PATH . 'includes/im-companion.php';
 \AiutomaDev\Includes\Mcp_Companion::init();
 \AiutomaDev\Includes\Im_Companion::init();
 add_filter('aiutoma_automation_dev_extension_active', '__return_true');
+add_filter('aiutoma_enable_core_manage_users', '__return_false');
+add_filter('aiutoma_enable_core_manage_options', '__return_false');
 
 // Clean up MU plugins on deactivation
 register_deactivation_hook(__FILE__, function () {
