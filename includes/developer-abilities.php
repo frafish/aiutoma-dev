@@ -21,6 +21,9 @@ class Developer_Abilities {
         self::register_execute_php();
         self::register_run_wp_cli();
         self::register_modify_file();
+        self::register_patch_file();
+        self::register_grep_files();
+        self::register_inspect_hooks();
         self::register_db_query();
         self::register_dev_manage_users();
         self::register_manage_users();
@@ -31,6 +34,8 @@ class Developer_Abilities {
         self::register_list_directory();
         self::register_manage_plugins();
         self::register_manage_themes();
+        self::register_manage_system();
+        self::register_manage_debug();
     }
 
     private static function register_execute_php() {
@@ -469,6 +474,305 @@ class Developer_Abilities {
         ]);
     }
 
+    private static function register_patch_file() {
+        \Aiutoma\Modules\Ai\Abilities::register('aiutoma/patch-file', [
+            'category' => 'aiutoma',
+            'label' => __('Patch File (Search & Replace)', 'aiutoma-dev'),
+            'meta' => [
+                'requires_confirmation' => true,
+                'mcp' => ['public' => true]
+            ],
+            'description' => __('Performs an exact literal search-and-replace in a file on the server without needing to rewrite the entire file. Safely restricted to wp-content.', 'aiutoma-dev'),
+            'execute_callback' => function ($input) {
+                $path = wp_normalize_path($input['path']);
+                $search = $input['search'];
+                $replace = $input['replace'];
+                $expected = isset($input['expected_matches']) ? intval($input['expected_matches']) : 1;
+
+                $allowed_dir = wp_normalize_path(WP_CONTENT_DIR);
+                if (strpos($path, $allowed_dir) !== 0 || strpos($path, '..') !== false) {
+                    return new \WP_Error('security_error', __('You can only modify files inside the wp-content directory.', 'aiutoma-dev'));
+                }
+
+                if (!file_exists($path)) {
+                    return new \WP_Error('file_not_found', "File not found: $path");
+                }
+
+                $content = file_get_contents($path);
+                if ($content === false) {
+                    return new \WP_Error('file_error', "Failed to read file: $path");
+                }
+
+                $count = 0;
+                $new_content = str_replace($search, $replace, $content, $count);
+
+                if ($count === 0) {
+                    return new \WP_Error('search_not_found', __('The search string was not found in the file.', 'aiutoma-dev'));
+                }
+
+                if ($expected > 0 && $count !== $expected) {
+                    return new \WP_Error('unexpected_match_count', sprintf(__('Expected %d occurrence(s) to replace, but found %d. Aborting for safety.', 'aiutoma-dev'), $expected, $count));
+                }
+
+                $backup = isset($input['create_backup']) ? (bool)$input['create_backup'] : true;
+                $backup_path = null;
+                if ($backup) {
+                    $backup_path = $path . '.bak.' . time();
+                    file_put_contents($backup_path, $content);
+                }
+
+                if (file_put_contents($path, $new_content) === false) {
+                    return new \WP_Error('file_write_error', __('Failed to write to file. Check permissions.', 'aiutoma-dev'));
+                }
+
+                $res = [
+                    'success' => true,
+                    'replaced_count' => $count,
+                    'message' => "File $path successfully patched ($count replacement(s) made)."
+                ];
+                if ($backup_path) {
+                    $res['backup'] = basename($backup_path);
+                }
+                return $res;
+            },
+            'permission_callback' => function () {
+                return current_user_can('manage_options');
+            },
+            'input_schema' => [
+                'type' => 'object',
+                'properties' => [
+                    'path' => ['type' => 'string', 'description' => 'Absolute path of the file to patch (inside wp-content).'],
+                    'search' => ['type' => 'string', 'description' => 'The exact literal text or code snippet to find.'],
+                    'replace' => ['type' => 'string', 'description' => 'The exact text to replace the search string with.'],
+                    'expected_matches' => ['type' => 'integer', 'default' => 1, 'description' => 'Expected number of occurrences to replace (default 1 to prevent unintended changes). Set to 0 to replace all occurrences.'],
+                    'create_backup' => ['type' => 'boolean', 'default' => true, 'description' => 'Create a timestamped .bak backup file before modifying.']
+                ],
+                'required' => ['path', 'search', 'replace']
+            ]
+        ]);
+    }
+
+    private static function register_grep_files() {
+        \Aiutoma\Modules\Ai\Abilities::register('aiutoma/grep-files', [
+            'category' => 'aiutoma',
+            'label' => __('Grep Files (Fast Text Search)', 'aiutoma-dev'),
+            'meta' => [
+                'requires_confirmation' => false,
+                'mcp' => ['public' => true]
+            ],
+            'description' => __('Search for text or regex patterns across files in wp-content (themes, plugins). Returns compact matching lines with line numbers.', 'aiutoma-dev'),
+            'execute_callback' => function ($input) {
+                $path = wp_normalize_path($input['path'] ?? WP_CONTENT_DIR);
+                $query = $input['query'] ?? ($input['search'] ?? '');
+                $is_regex = !empty($input['is_regex']);
+                $extensions = isset($input['extensions']) ? (array) $input['extensions'] : ['php', 'js', 'css', 'json', 'md', 'html'];
+                $max_results = min(100, max(1, intval($input['max_results'] ?? 25)));
+                $case_sensitive = !empty($input['case_sensitive']);
+
+                $allowed_dir = wp_normalize_path(WP_CONTENT_DIR);
+                if (strpos($path, $allowed_dir) !== 0 || strpos($path, '..') !== false) {
+                    return new \WP_Error('security_error', __('You can only search files inside the wp-content directory.', 'aiutoma-dev'));
+                }
+
+                if (empty($query)) {
+                    return new \WP_Error('missing_query', __('Search query is required.', 'aiutoma-dev'));
+                }
+
+                if (!is_dir($path) && !file_exists($path)) {
+                    return new \WP_Error('not_found', "Path not found: $path");
+                }
+
+                $matches = [];
+                $files_searched = 0;
+
+                $search_file = function($filepath) use ($query, $is_regex, $case_sensitive, &$matches, $max_results, $allowed_dir) {
+                    if (count($matches) >= $max_results) return;
+                    if (filesize($filepath) > 2 * 1024 * 1024) return; // Skip files > 2MB
+
+                    $content = file_get_contents($filepath);
+                    if ($content === false) return;
+
+                    // Quick substring check before line splitting
+                    if (!$is_regex && !$case_sensitive) {
+                        if (stripos($content, $query) === false) return;
+                    } elseif (!$is_regex && $case_sensitive) {
+                        if (strpos($content, $query) === false) return;
+                    }
+
+                    $lines = explode("\n", $content);
+                    $rel_path = str_replace($allowed_dir, 'wp-content', $filepath);
+
+                    foreach ($lines as $idx => $line) {
+                        if (count($matches) >= $max_results) break;
+                        $matched = false;
+
+                        if ($is_regex) {
+                            $flags = $case_sensitive ? '' : 'i';
+                            $pattern = '/' . str_replace('/', '\/', $query) . '/' . $flags;
+                            $matched = @preg_match($pattern, $line);
+                        } elseif ($case_sensitive) {
+                            $matched = (strpos($line, $query) !== false);
+                        } else {
+                            $matched = (stripos($line, $query) !== false);
+                        }
+
+                        if ($matched) {
+                            $matches[] = [
+                                'file' => $rel_path,
+                                'line' => $idx + 1,
+                                'match' => trim(mb_substr($line, 0, 160))
+                            ];
+                        }
+                    }
+                };
+
+                if (is_file($path)) {
+                    $search_file($path);
+                    $files_searched = 1;
+                } else {
+                    $ext_map = array_fill_keys(array_map('strtolower', $extensions), true);
+                    $iterator = new \RecursiveIteratorIterator(
+                        new \RecursiveDirectoryIterator($path, \RecursiveDirectoryIterator::SKIP_DOTS),
+                        \RecursiveIteratorIterator::SELF_FIRST
+                    );
+
+                    foreach ($iterator as $item) {
+                        if (count($matches) >= $max_results) break;
+                        if ($item->isFile()) {
+                            $ext = strtolower($item->getExtension());
+                            if (isset($ext_map[$ext])) {
+                                $files_searched++;
+                                $search_file($item->getPathname());
+                            }
+                        }
+                    }
+                }
+
+                return [
+                    'success' => true,
+                    'query' => $query,
+                    'total_matches' => count($matches),
+                    'files_searched' => $files_searched,
+                    'matches' => $matches,
+                    'truncated' => count($matches) >= $max_results
+                ];
+            },
+            'permission_callback' => function () {
+                return current_user_can('manage_options');
+            },
+            'input_schema' => [
+                'type' => 'object',
+                'properties' => [
+                    'path' => ['type' => 'string', 'description' => 'Directory or file to search within (must be inside wp-content). Defaults to wp-content.'],
+                    'query' => ['type' => 'string', 'description' => 'Text string or regex pattern to search for.'],
+                    'is_regex' => ['type' => 'boolean', 'default' => false, 'description' => 'Whether query is a regex pattern.'],
+                    'extensions' => ['type' => 'array', 'items' => ['type' => 'string'], 'description' => 'File extensions to search (default: php, js, css, json, md, html).'],
+                    'max_results' => ['type' => 'integer', 'default' => 25, 'description' => 'Maximum number of matching lines to return (capped at 100).'],
+                    'case_sensitive' => ['type' => 'boolean', 'default' => false, 'description' => 'Whether search is case-sensitive.']
+                ],
+                'required' => ['query']
+            ]
+        ]);
+    }
+
+    private static function register_inspect_hooks() {
+        \Aiutoma\Modules\Ai\Abilities::register('aiutoma/inspect-hooks', [
+            'category' => 'aiutoma',
+            'label' => __('Inspect WordPress Hooks', 'aiutoma-dev'),
+            'meta' => [
+                'requires_confirmation' => false,
+                'mcp' => ['public' => true]
+            ],
+            'description' => __('Inspect all active callbacks, priorities, and source files attached to a WordPress action or filter hook.', 'aiutoma-dev'),
+            'execute_callback' => function ($input) {
+                global $wp_filter;
+                $hook = sanitize_key($input['hook'] ?? ($input['tag'] ?? ''));
+                $search = isset($input['search']) ? trim($input['search']) : '';
+
+                if (empty($hook)) {
+                    return new \WP_Error('missing_hook', __('Hook name is required.', 'aiutoma-dev'));
+                }
+
+                if (!isset($wp_filter[$hook])) {
+                    return [
+                        'success' => true,
+                        'hook' => $hook,
+                        'total_callbacks' => 0,
+                        'message' => "No callbacks attached to hook '$hook'."
+                    ];
+                }
+
+                $hook_obj = $wp_filter[$hook];
+                $callbacks = [];
+
+                if (isset($hook_obj->callbacks) && is_array($hook_obj->callbacks)) {
+                    foreach ($hook_obj->callbacks as $priority => $priority_callbacks) {
+                        foreach ($priority_callbacks as $id => $callback_data) {
+                            $fn = $callback_data['function'];
+                            $accepted_args = $callback_data['accepted_args'] ?? 1;
+                            $info = [
+                                'priority' => $priority,
+                                'accepted_args' => $accepted_args
+                            ];
+
+                            if (is_string($fn)) {
+                                $info['type'] = 'function';
+                                $info['callable'] = $fn;
+                                try {
+                                    $ref = new \ReflectionFunction($fn);
+                                    $info['file'] = str_replace(ABSPATH, '', $ref->getFileName() ?: '');
+                                    $info['line'] = $ref->getStartLine();
+                                } catch (\Throwable $e) {}
+                            } elseif (is_array($fn)) {
+                                $class = is_object($fn[0]) ? get_class($fn[0]) : $fn[0];
+                                $method = $fn[1];
+                                $info['type'] = is_object($fn[0]) ? 'method' : 'static_method';
+                                $info['callable'] = "{$class}::{$method}";
+                                try {
+                                    $ref = new \ReflectionMethod($class, $method);
+                                    $info['file'] = str_replace(ABSPATH, '', $ref->getFileName() ?: '');
+                                    $info['line'] = $ref->getStartLine();
+                                } catch (\Throwable $e) {}
+                            } elseif ($fn instanceof \Closure) {
+                                $info['type'] = 'closure';
+                                $info['callable'] = 'Closure';
+                                try {
+                                    $ref = new \ReflectionFunction($fn);
+                                    $info['file'] = str_replace(ABSPATH, '', $ref->getFileName() ?: '');
+                                    $info['line'] = $ref->getStartLine();
+                                } catch (\Throwable $e) {}
+                            }
+
+                            if ($search !== '' && stripos($info['callable'] ?? '', $search) === false && stripos($info['file'] ?? '', $search) === false) {
+                                continue;
+                            }
+
+                            $callbacks[] = $info;
+                        }
+                    }
+                }
+
+                return [
+                    'success' => true,
+                    'hook' => $hook,
+                    'total_callbacks' => count($callbacks),
+                    'callbacks' => $callbacks
+                ];
+            },
+            'permission_callback' => function () {
+                return current_user_can('manage_options');
+            },
+            'input_schema' => [
+                'type' => 'object',
+                'properties' => [
+                    'hook' => ['type' => 'string', 'description' => 'The action or filter hook name (e.g. "query_loop_block_query_vars", "init", "woocommerce_before_calculate_totals").'],
+                    'search' => ['type' => 'string', 'description' => 'Optional string to filter callbacks by function name or file.']
+                ],
+                'required' => ['hook']
+            ]
+        ]);
+    }
+
     private static function register_db_query() {
         \Aiutoma\Modules\Ai\Abilities::register('aiutoma/db-query', [
             'category' => 'aiutoma',
@@ -880,6 +1184,38 @@ class Developer_Abilities {
             'description' => __('Get, update, or delete WordPress site options safely in developer mode.', 'aiutoma-dev'),
             'execute_callback' => function ($input) {
                 $action = $input['action'] ?? 'get';
+
+                if ($action === 'search' || $action === 'list') {
+                    global $wpdb;
+                    $search = trim($input['search'] ?? ($input['prefix'] ?? ($input['option_name'] ?? '')));
+                    $limit = min(50, max(1, intval($input['limit'] ?? 20)));
+                    if (empty($search)) {
+                        return new \WP_Error('missing_search', __('Search term or prefix is required.', 'aiutoma-dev'));
+                    }
+                    $like = '%' . $wpdb->esc_like($search) . '%';
+                    // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
+                    $rows = $wpdb->get_results($wpdb->prepare(
+                        "SELECT option_name, option_value FROM {$wpdb->options} WHERE option_name LIKE %s LIMIT %d",
+                        $like,
+                        $limit
+                    ), ARRAY_A);
+
+                    $options = [];
+                    foreach ($rows as $row) {
+                        $val = maybe_unserialize($row['option_value']);
+                        if (is_string($val) && strlen($val) > 300) {
+                            $val = substr($val, 0, 300) . '... [truncated]';
+                        }
+                        $options[$row['option_name']] = $val;
+                    }
+                    return [
+                        'success' => true,
+                        'search' => $search,
+                        'total' => count($options),
+                        'options' => $options
+                    ];
+                }
+
                 $option_name = sanitize_key($input['option_name'] ?? '');
 
                 if (empty($option_name)) {
@@ -936,12 +1272,21 @@ class Developer_Abilities {
                 'properties' => [
                     'action' => [
                         'type' => 'string',
-                        'enum' => ['get', 'update', 'delete'],
-                        'description' => 'The action to perform: "get", "update", or "delete".'
+                        'enum' => ['get', 'update', 'delete', 'search'],
+                        'description' => 'The action to perform: "get", "update", "delete", or "search".'
                     ],
                     'option_name' => [
                         'type' => 'string',
-                        'description' => 'The name of the WordPress option.'
+                        'description' => 'The name of the WordPress option (required for get, update, delete).'
+                    ],
+                    'search' => [
+                        'type' => 'string',
+                        'description' => 'Keyword or prefix to search for options (for action "search").'
+                    ],
+                    'limit' => [
+                        'type' => 'integer',
+                        'default' => 20,
+                        'description' => 'Max number of options to return in search (capped at 50).'
                     ],
                     'option_value' => [
                         'description' => 'The value to store (required for "update"). Can be string, number, boolean, or array.'
@@ -954,7 +1299,7 @@ class Developer_Abilities {
                         'description' => 'Whether to autoload the option when WordPress starts (optional, for "update").'
                     ]
                 ],
-                'required' => ['action', 'option_name']
+                'required' => ['action']
             ]
         ]);
     }
@@ -1557,12 +1902,35 @@ add_action( 'after_setup_theme', function () {
                 'requires_confirmation' => false,
                 'mcp' => ['public' => true]
             ],
-            'description' => __('Read a file from the server.', 'aiutoma-dev'),
+            'description' => __('Read a file from the server. Supports optional start_line and end_line parameters for targeted chunk reading.', 'aiutoma-dev'),
             'execute_callback' => function ($input) {
                 $path = $input['path'];
                 if (!file_exists($path)) {
                     return new \WP_Error('file_error', 'File not found: ' . $path);
                 }
+
+                $start_line = isset($input['start_line']) ? max(1, intval($input['start_line'])) : null;
+                $end_line = isset($input['end_line']) ? max(1, intval($input['end_line'])) : null;
+
+                if ($start_line !== null || $end_line !== null) {
+                    $lines = file($path);
+                    if ($lines === false) {
+                        return new \WP_Error('file_error', 'Failed to read file: ' . $path);
+                    }
+                    $total_lines = count($lines);
+                    $start_idx = ($start_line !== null) ? $start_line - 1 : 0;
+                    $end_idx = ($end_line !== null) ? min($total_lines, $end_line) : $total_lines;
+                    $length = max(0, $end_idx - $start_idx);
+                    $slice = array_slice($lines, $start_idx, $length);
+                    return [
+                        'success' => true,
+                        'total_lines' => $total_lines,
+                        'start_line' => $start_idx + 1,
+                        'end_line' => $start_idx + count($slice),
+                        'content' => implode('', $slice)
+                    ];
+                }
+
                 $content = file_get_contents($path);
                 if ($content === false) {
                     return new \WP_Error('file_error', 'Failed to read file: ' . $path);
@@ -1575,7 +1943,9 @@ add_action( 'after_setup_theme', function () {
             'input_schema' => [
                 'type' => 'object',
                 'properties' => [
-                    'path' => ['type' => 'string', 'description' => 'Absolute file path']
+                    'path' => ['type' => 'string', 'description' => 'Absolute file path'],
+                    'start_line' => ['type' => 'integer', 'description' => 'Optional 1-based start line number to begin reading from.'],
+                    'end_line' => ['type' => 'integer', 'description' => 'Optional 1-based end line number (inclusive) to stop reading at.']
                 ],
                 'required' => ['path']
             ]
@@ -2010,6 +2380,102 @@ add_action( 'after_setup_theme', function () {
         }
 
         return new \WP_Error('invalid_type', 'Invalid download type.', ['status' => 400]);
+    }
+
+    private static function register_manage_system() {
+        \Aiutoma\Modules\Ai\Abilities::register('aiutoma/manage-system', [
+            'category' => 'aiutoma',
+            'label' => __('Manage System & Cache', 'aiutoma-dev'),
+            'description' => __('Perform system actions like flushing permalinks, clearing cache, and transients.', 'aiutoma-dev'),
+            'execute_callback' => function ($input) {
+                $action = $input['action'];
+                if ($action === 'flush_rewrite_rules') {
+                    flush_rewrite_rules();
+                    return ['success' => true, 'message' => 'Rewrite rules flushed.'];
+                } elseif ($action === 'clear_transients') {
+                    global $wpdb;
+                    // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
+                    $wpdb->query("DELETE FROM {$wpdb->options} WHERE option_name LIKE '\_transient\_%' OR option_name LIKE '\_site\_transient\_%'");
+                    return ['success' => true, 'message' => 'Transients cleared.'];
+                } elseif ($action === 'clear_cache') {
+                    $cleared = [];
+                    if (function_exists('rocket_clean_domain')) {
+                        rocket_clean_domain();
+                        $cleared[] = 'WP Rocket';
+                    }
+                    if (function_exists('w3tc_flush_all')) {
+                        w3tc_flush_all();
+                        $cleared[] = 'W3TC';
+                    }
+                    if (class_exists('LiteSpeed\Purge')) {
+                        \LiteSpeed\Purge::purge_all();
+                        $cleared[] = 'LiteSpeed';
+                    }
+                    if (function_exists('sg_cachepress_purge_cache')) {
+                        sg_cachepress_purge_cache();
+                        $cleared[] = 'SG Optimizer';
+                    }
+                    return ['success' => true, 'message' => 'Cache cleared.', 'cleared_systems' => $cleared];
+                }
+                return new \WP_Error('invalid_action', 'Unsupported action.');
+            },
+            'permission_callback' => function () {
+                return current_user_can('manage_options');
+            },
+            'input_schema' => [
+                'type' => 'object',
+                'properties' => [
+                    'action' => ['type' => 'string', 'enum' => ['flush_rewrite_rules', 'clear_transients', 'clear_cache'], 'description' => 'Action to perform']
+                ],
+                'required' => ['action']
+            ]
+        ]);
+    }
+
+    private static function register_manage_debug() {
+        \Aiutoma\Modules\Ai\Abilities::register('aiutoma/manage-debug', [
+            'category' => 'aiutoma',
+            'label' => __('Manage Debug Log', 'aiutoma-dev'),
+            'description' => __('Read or check WordPress debug logging. Reads the debug log file from the content directory.', 'aiutoma-dev'),
+            'execute_callback' => function ($input) {
+                $action = $input['action'];
+                $log_path = (defined('WP_CONTENT_DIR') ? WP_CONTENT_DIR : dirname(wp_upload_dir()['basedir'])) . '/debug.log';
+
+                if ($action === 'read') {
+                    if (!file_exists($log_path)) {
+                        return ['success' => true, 'log' => 'Debug log is empty or does not exist.'];
+                    }
+                    $filesize = filesize($log_path);
+                    $read_size = min(100000, $filesize);
+                    $offset = max(0, $filesize - $read_size);
+                    $log_content = file_get_contents($log_path, false, null, $offset, $read_size);
+                    if ($log_content !== false) {
+                        return ['success' => true, 'log' => $log_content];
+                    }
+                    return new \WP_Error('read_error', 'Could not read debug.log.');
+                }
+
+                if ($action === 'enable' || $action === 'disable') {
+                    $is_enabled = defined('WP_DEBUG') && WP_DEBUG;
+                    return [
+                        'success' => true,
+                        'message' => $is_enabled ? 'WP_DEBUG is currently active.' : 'WP_DEBUG is not enabled in wp-config.php.'
+                    ];
+                }
+
+                return new \WP_Error('invalid_action', 'Unsupported action.');
+            },
+            'permission_callback' => function () {
+                return current_user_can('manage_options');
+            },
+            'input_schema' => [
+                'type' => 'object',
+                'properties' => [
+                    'action' => ['type' => 'string', 'enum' => ['enable', 'disable', 'read'], 'description' => 'Action to perform']
+                ],
+                'required' => ['action']
+            ]
+        ]);
     }
 }
 
