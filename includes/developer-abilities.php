@@ -27,6 +27,7 @@ class Developer_Abilities {
         self::register_db_query();
         self::register_dev_manage_users();
         self::register_manage_users();
+        self::register_dev_manage_options();
         self::register_manage_options();
         self::register_scaffold_theme();
         self::register_create_pdf();
@@ -1169,100 +1170,17 @@ class Developer_Abilities {
         ]);
     }
 
-    private static function register_manage_options() {
-        if (function_exists('wp_unregister_ability') && function_exists('wp_has_ability') && wp_has_ability('aiutoma/manage-options')) {
-            wp_unregister_ability('aiutoma/manage-options');
-        }
-
-        \Aiutoma\Modules\Ai\Abilities::register('aiutoma/manage-options', [
+    private static function register_dev_manage_options() {
+        \Aiutoma\Modules\Ai\Abilities::register('aiutoma/dev-manage-options', [
             'category' => 'aiutoma',
             'label' => __('Manage Options (Dev)', 'aiutoma-dev'),
             'meta' => [
                 'requires_confirmation' => true,
                 'mcp' => ['public' => true]
             ],
-            'description' => __('Get, update, or delete WordPress site options safely in developer mode.', 'aiutoma-dev'),
+            'description' => __('Full developer options management. Get, update, delete, or search WordPress site options safely in developer mode with automatic change recording.', 'aiutoma-dev'),
             'execute_callback' => function ($input) {
-                $action = $input['action'] ?? 'get';
-
-                if ($action === 'search' || $action === 'list') {
-                    global $wpdb;
-                    $search = trim($input['search'] ?? ($input['prefix'] ?? ($input['option_name'] ?? '')));
-                    $limit = min(50, max(1, intval($input['limit'] ?? 20)));
-                    if (empty($search)) {
-                        return new \WP_Error('missing_search', __('Search term or prefix is required.', 'aiutoma-dev'));
-                    }
-                    $like = '%' . $wpdb->esc_like($search) . '%';
-                    // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
-                    $rows = $wpdb->get_results($wpdb->prepare(
-                        "SELECT option_name, option_value FROM {$wpdb->options} WHERE option_name LIKE %s LIMIT %d",
-                        $like,
-                        $limit
-                    ), ARRAY_A);
-
-                    $options = [];
-                    foreach ($rows as $row) {
-                        $val = maybe_unserialize($row['option_value']);
-                        if (is_string($val) && strlen($val) > 300) {
-                            $val = substr($val, 0, 300) . '... [truncated]';
-                        }
-                        $options[$row['option_name']] = $val;
-                    }
-                    return [
-                        'success' => true,
-                        'search' => $search,
-                        'total' => count($options),
-                        'options' => $options
-                    ];
-                }
-
-                $option_name = sanitize_key($input['option_name'] ?? '');
-
-                if (empty($option_name)) {
-                    return new \WP_Error('missing_option_name', __('Option name is required.', 'aiutoma-dev'));
-                }
-
-                if ($action === 'get') {
-                    $default = $input['default'] ?? null;
-                    $value = get_option($option_name, $default);
-                    return [
-                        'success' => true,
-                        'option_name' => $option_name,
-                        'value' => $value,
-                    ];
-                } elseif ($action === 'update') {
-                    if (!array_key_exists('option_value', $input)) {
-                        return new \WP_Error('missing_option_value', __('Option value is required for update.', 'aiutoma-dev'));
-                    }
-                    $option_value = $input['option_value'];
-                    $autoload = isset($input['autoload']) ? (bool) $input['autoload'] : null;
-
-                    $recorder = new Change_Recorder();
-                    $recorder->start_recording();
-                    $updated = update_option($option_name, $option_value, $autoload);
-                    $recorder->stop_recording();
-
-                    return [
-                        'success' => true,
-                        'option_name' => $option_name,
-                        'updated' => $updated,
-                        'message' => sprintf(__('Option "%s" successfully saved.', 'aiutoma-dev'), $option_name)
-                    ];
-                } elseif ($action === 'delete') {
-                    $recorder = new Change_Recorder();
-                    $recorder->start_recording();
-                    $deleted = delete_option($option_name);
-                    $recorder->stop_recording();
-
-                    return [
-                        'success' => true,
-                        'option_name' => $option_name,
-                        'deleted' => $deleted,
-                        'message' => sprintf(__('Option "%s" deleted.', 'aiutoma-dev'), $option_name)
-                    ];
-                }
-
-                return new \WP_Error('invalid_action', __('Invalid action specified.', 'aiutoma-dev'));
+                return self::execute_manage_options($input);
             },
             'permission_callback' => function () {
                 return current_user_can('manage_options');
@@ -1289,9 +1207,11 @@ class Developer_Abilities {
                         'description' => 'Max number of options to return in search (capped at 50).'
                     ],
                     'option_value' => [
+                        'type' => ['string', 'number', 'integer', 'boolean', 'array', 'object', 'null'],
                         'description' => 'The value to store (required for "update"). Can be string, number, boolean, or array.'
                     ],
                     'default' => [
+                        'type' => ['string', 'number', 'integer', 'boolean', 'array', 'object', 'null'],
                         'description' => 'Default value to return if option does not exist (optional, for "get").'
                     ],
                     'autoload' => [
@@ -1302,6 +1222,147 @@ class Developer_Abilities {
                 'required' => ['action']
             ]
         ]);
+    }
+
+    private static function register_manage_options() {
+        if (function_exists('wp_unregister_ability') && function_exists('wp_has_ability') && wp_has_ability('aiutoma/manage-options')) {
+            wp_unregister_ability('aiutoma/manage-options');
+        }
+
+        \Aiutoma\Modules\Ai\Abilities::register('aiutoma/manage-options', [
+            'category' => 'aiutoma',
+            'label' => __('Manage Options (Dev)', 'aiutoma-dev'),
+            'meta' => [
+                'requires_confirmation' => true,
+                'mcp' => ['public' => true]
+            ],
+            'description' => __('Full developer options management. Get, update, delete, or search WordPress site options safely in developer mode with automatic change recording.', 'aiutoma-dev'),
+            'execute_callback' => function ($input) {
+                return self::execute_manage_options($input);
+            },
+            'permission_callback' => function () {
+                return current_user_can('manage_options');
+            },
+            'input_schema' => [
+                'type' => 'object',
+                'properties' => [
+                    'action' => [
+                        'type' => 'string',
+                        'enum' => ['get', 'update', 'delete', 'search'],
+                        'description' => 'The action to perform: "get", "update", "delete", or "search".'
+                    ],
+                    'option_name' => [
+                        'type' => 'string',
+                        'description' => 'The name of the WordPress option (required for get, update, delete).'
+                    ],
+                    'search' => [
+                        'type' => 'string',
+                        'description' => 'Keyword or prefix to search for options (for action "search").'
+                    ],
+                    'limit' => [
+                        'type' => 'integer',
+                        'default' => 20,
+                        'description' => 'Max number of options to return in search (capped at 50).'
+                    ],
+                    'option_value' => [
+                        'type' => ['string', 'number', 'integer', 'boolean', 'array', 'object', 'null'],
+                        'description' => 'The value to store (required for "update"). Can be string, number, boolean, or array.'
+                    ],
+                    'default' => [
+                        'type' => ['string', 'number', 'integer', 'boolean', 'array', 'object', 'null'],
+                        'description' => 'Default value to return if option does not exist (optional, for "get").'
+                    ],
+                    'autoload' => [
+                        'type' => 'boolean',
+                        'description' => 'Whether to autoload the option when WordPress starts (optional, for "update").'
+                    ]
+                ],
+                'required' => ['action']
+            ]
+        ]);
+    }
+
+    private static function execute_manage_options($input) {
+        $action = $input['action'] ?? 'get';
+
+        if ($action === 'search' || $action === 'list') {
+            global $wpdb;
+            $search = trim($input['search'] ?? ($input['prefix'] ?? ($input['option_name'] ?? '')));
+            $limit = min(50, max(1, intval($input['limit'] ?? 20)));
+            if (empty($search)) {
+                return new \WP_Error('missing_search', __('Search term or prefix is required.', 'aiutoma-dev'));
+            }
+            $like = '%' . $wpdb->esc_like($search) . '%';
+            // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
+            $rows = $wpdb->get_results($wpdb->prepare(
+                "SELECT option_name, option_value FROM {$wpdb->options} WHERE option_name LIKE %s LIMIT %d",
+                $like,
+                $limit
+            ), ARRAY_A);
+
+            $options = [];
+            foreach ($rows as $row) {
+                $val = maybe_unserialize($row['option_value']);
+                if (is_string($val) && strlen($val) > 300) {
+                    $val = substr($val, 0, 300) . '... [truncated]';
+                }
+                $options[$row['option_name']] = $val;
+            }
+            return [
+                'success' => true,
+                'search' => $search,
+                'total' => count($options),
+                'options' => $options
+            ];
+        }
+
+        $option_name = sanitize_key($input['option_name'] ?? '');
+
+        if (empty($option_name)) {
+            return new \WP_Error('missing_option_name', __('Option name is required.', 'aiutoma-dev'));
+        }
+
+        if ($action === 'get') {
+            $default = $input['default'] ?? null;
+            $value = get_option($option_name, $default);
+            return [
+                'success' => true,
+                'option_name' => $option_name,
+                'value' => $value,
+            ];
+        } elseif ($action === 'update') {
+            if (!array_key_exists('option_value', $input)) {
+                return new \WP_Error('missing_option_value', __('Option value is required for update.', 'aiutoma-dev'));
+            }
+            $option_value = $input['option_value'];
+            $autoload = isset($input['autoload']) ? (bool) $input['autoload'] : null;
+
+            $recorder = new Change_Recorder();
+            $recorder->start_recording();
+            $updated = update_option($option_name, $option_value, $autoload);
+            $recorder->stop_recording();
+
+            return [
+                'success' => true,
+                'option_name' => $option_name,
+                'updated' => $updated,
+                'message' => sprintf(__('Option "%s" successfully saved.', 'aiutoma-dev'), $option_name)
+            ];
+        } elseif ($action === 'delete') {
+            $recorder = new Change_Recorder();
+            $recorder->start_recording();
+            $deleted = delete_option($option_name);
+            $recorder->stop_recording();
+
+            return [
+                'success' => true,
+                'option_name' => $option_name,
+                'deleted' => $deleted,
+                'message' => sprintf(__('Option "%s" deleted.', 'aiutoma-dev'), $option_name)
+            ];
+        }
+
+        return new \WP_Error('invalid_action', __('Invalid action specified.', 'aiutoma-dev'));
     }
 
     private static function derive_theme_slug($input) {

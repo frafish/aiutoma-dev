@@ -50,8 +50,9 @@ class Mcp_Companion {
      * @return bool
      */
     public static function is_mcp_request() {
-        $uri = isset($_SERVER['REQUEST_URI']) ? (string) $_SERVER['REQUEST_URI'] : '';
-        $rest_route = isset($_GET['rest_route']) ? (string) $_GET['rest_route'] : '';
+        $uri = isset($_SERVER['REQUEST_URI']) ? sanitize_text_field(wp_unslash($_SERVER['REQUEST_URI'])) : '';
+        // phpcs:ignore WordPress.Security.NonceVerification.Recommended -- Reading rest_route for request detection.
+        $rest_route = isset($_GET['rest_route']) ? sanitize_text_field(wp_unslash($_GET['rest_route'])) : '';
 
         if (strpos($uri, '/aiutoma/v1/mcp') !== false || strpos($uri, '/aiutoma/v1/mcp-adapter') !== false) {
             return true;
@@ -61,8 +62,11 @@ class Mcp_Companion {
             return true;
         }
 
-        if (isset($_SERVER['PATH_INFO']) && (strpos($_SERVER['PATH_INFO'], '/aiutoma/v1/mcp') !== false || strpos($_SERVER['PATH_INFO'], '/aiutoma/v1/mcp-adapter') !== false)) {
-            return true;
+        if (isset($_SERVER['PATH_INFO'])) {
+            $path_info = sanitize_text_field(wp_unslash($_SERVER['PATH_INFO']));
+            if (strpos($path_info, '/aiutoma/v1/mcp') !== false || strpos($path_info, '/aiutoma/v1/mcp-adapter') !== false) {
+                return true;
+            }
         }
 
         return false;
@@ -85,7 +89,9 @@ class Mcp_Companion {
                 $api_key = sanitize_text_field($headers['x-mcp-api-key']);
             }
         }
+        // phpcs:ignore WordPress.Security.NonceVerification.Recommended -- Reading token for API key authentication.
         if (empty($api_key) && !empty($_REQUEST['token'])) {
+            // phpcs:ignore WordPress.Security.NonceVerification.Recommended -- Reading token for API key authentication.
             $api_key = sanitize_text_field(wp_unslash($_REQUEST['token']));
         }
 
@@ -100,15 +106,21 @@ class Mcp_Companion {
      * @return int|false
      */
     public static function determine_current_user_for_mcp($user_id) {
-        if (!empty($user_id)) {
+        static $is_resolving = false;
+        if ($is_resolving || !empty($user_id)) {
             return $user_id;
         }
+        $is_resolving = true;
 
-        if (self::is_mcp_request() && self::has_valid_mcp_api_key()) {
-            $admin_id = self::get_main_admin_id();
-            if ($admin_id > 0) {
-                return $admin_id;
+        try {
+            if (self::is_mcp_request() && self::has_valid_mcp_api_key()) {
+                $admin_id = self::get_main_admin_id();
+                if ($admin_id > 0) {
+                    return $admin_id;
+                }
             }
+        } finally {
+            $is_resolving = false;
         }
 
         return $user_id;
@@ -143,9 +155,15 @@ class Mcp_Companion {
      * @return int
      */
     public static function get_main_admin_id() {
-        // 1. Try User ID 1 if they have administrator capability
+        static $cached_admin_id = null;
+        if ($cached_admin_id !== null) {
+            return $cached_admin_id;
+        }
+
+        // 1. Try User ID 1 if they have administrator role
         $user1 = get_userdata(1);
-        if ($user1 && $user1->has_cap('manage_options')) {
+        if ($user1 && in_array('administrator', (array) $user1->roles, true)) {
+            $cached_admin_id = 1;
             return 1;
         }
 
@@ -157,7 +175,8 @@ class Mcp_Companion {
             'order'   => 'ASC',
         ]);
         if (!empty($admins)) {
-            return (int) $admins[0]->ID;
+            $cached_admin_id = (int) $admins[0]->ID;
+            return $cached_admin_id;
         }
 
         // 3. Fallback to any user with manage_options
@@ -168,9 +187,11 @@ class Mcp_Companion {
             'order'      => 'ASC',
         ]);
         if (!empty($managers)) {
-            return (int) $managers[0]->ID;
+            $cached_admin_id = (int) $managers[0]->ID;
+            return $cached_admin_id;
         }
 
+        $cached_admin_id = 0;
         return 0;
     }
 

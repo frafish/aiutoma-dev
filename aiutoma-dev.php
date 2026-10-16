@@ -6,6 +6,7 @@
  * Version:           1.0.0
  * Requires at least: 6.0
  * Requires PHP:      8.1
+ * Requires Plugins: aiutoma
  * Author:            Aiutoma Team
  * Author URI:        https://aiutoma.com
  * License:           GPL v2 or later
