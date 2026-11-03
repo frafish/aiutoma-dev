@@ -1,0 +1,57 @@
+name: Build and Release Plugin
+
+on:
+  push:
+    tags:
+      - 'v*'
+      - '[0-9]+.[0-9]+*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build & Release Package
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          tools: composer:v2
+
+      - name: Install dependencies (production)
+        run: |
+          composer install --no-dev --prefer-dist --no-interaction --optimize-autoloader
+
+      - name: Package plugin
+        run: |
+          # Create packaging directory with plugin slug as root
+          mkdir -p build/aiutoma-dev
+
+          # Copy files into build folder excluding dev files
+          rsync -av ./ build/aiutoma-dev/ \
+            --exclude '.git' \
+            --exclude '.github' \
+            --exclude '.gitignore' \
+            --exclude 'build' \
+            --exclude 'tests' \
+            --exclude 'phpunit.xml' \
+            --exclude 'phpcs.xml'
+
+          # Generate zip archive
+          cd build
+          zip -r ../aiutoma-dev.zip aiutoma-dev/
+          cd ..
+
+      - name: Create GitHub Release with Asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: aiutoma-dev.zip
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+

@@ -21,6 +21,7 @@ class Developer_Abilities {
         self::register_execute_php();
         self::register_run_wp_cli();
         self::register_modify_file();
+        self::register_batch_modify_files();
         self::register_patch_file();
         self::register_grep_files();
         self::register_inspect_hooks();
@@ -471,6 +472,143 @@ class Developer_Abilities {
                     'content' => ['type' => 'string', 'description' => 'The complete content to write into the file. It will completely overwrite the existing content, so make sure to provide the full file contents.']
                 ],
                 'required' => ['path', 'content']
+            ]
+        ]);
+    }
+
+    private static function register_batch_modify_files() {
+        \Aiutoma\Modules\Ai\Abilities::register('aiutoma/batch-modify-files', [
+            'category' => 'aiutoma',
+            'label' => __('Batch Modify Files', 'aiutoma-dev'),
+            'meta' => [
+                'requires_confirmation' => true,
+                'mcp' => ['public' => true]
+            ],
+            'description' => __('Writes or overwrites multiple files on the server in a single request, eliminating multiple round-trips for version updates or multi-file deployments. Safely restricted to wp-content.', 'aiutoma-dev'),
+            'execute_callback' => function ($input) {
+                if (empty($input['files']) || !is_array($input['files'])) {
+                    return new \WP_Error('invalid_input', __('A "files" array must be provided with path and content for each file.', 'aiutoma-dev'));
+                }
+
+                $allowed_dir = wp_normalize_path(WP_CONTENT_DIR);
+                $create_backup = !empty($input['create_backup']);
+                $atomic = !empty($input['atomic']);
+
+                // Pre-validation pass
+                $normalized_files = [];
+                foreach ($input['files'] as $idx => $f) {
+                    if (empty($f['path']) || !isset($f['content'])) {
+                        return new \WP_Error('invalid_file_entry', sprintf(__('File entry #%d is missing "path" or "content".', 'aiutoma-dev'), $idx));
+                    }
+
+                    $path = wp_normalize_path($f['path']);
+                    if (strpos($path, $allowed_dir) !== 0 || strpos($path, '..') !== false) {
+                        return new \WP_Error('security_error', sprintf(__('File path "%s" is outside the allowed wp-content directory.', 'aiutoma-dev'), $path));
+                    }
+
+                    $normalized_files[] = [
+                        'path' => $path,
+                        'content' => (string)$f['content'],
+                    ];
+                }
+
+                // If atomic, ensure all directories can be created and files are writable before writing anything
+                if ($atomic) {
+                    foreach ($normalized_files as $f) {
+                        $dir = dirname($f['path']);
+                        if (!is_dir($dir) && !wp_is_writable(dirname($dir))) {
+                            return new \WP_Error('dir_not_writable', sprintf(__('Directory "%s" cannot be created or is not writable.', 'aiutoma-dev'), $dir));
+                        }
+                        if (file_exists($f['path']) && !is_writable($f['path'])) {
+                            return new \WP_Error('file_not_writable', sprintf(__('File "%s" is not writable.', 'aiutoma-dev'), $f['path']));
+                        }
+                    }
+                }
+
+                $results = [];
+                $total_bytes = 0;
+                $successful = 0;
+                $failed = 0;
+
+                foreach ($normalized_files as $f) {
+                    $path = $f['path'];
+                    $content = $f['content'];
+                    $dir = dirname($path);
+
+                    if (!is_dir($dir)) {
+                        wp_mkdir_p($dir);
+                    }
+
+                    $backup_name = null;
+                    if ($create_backup && file_exists($path)) {
+                        $backup_path = $path . '.bak.' . time();
+                        if (@file_put_contents($backup_path, file_get_contents($path)) !== false) {
+                            $backup_name = basename($backup_path);
+                        }
+                    }
+
+                    $bytes = file_put_contents($path, $content);
+                    if ($bytes === false) {
+                        $failed++;
+                        $results[] = [
+                            'path' => $path,
+                            'success' => false,
+                            'error' => __('Failed to write file. Check file permissions.', 'aiutoma-dev'),
+                        ];
+                    } else {
+                        $successful++;
+                        $total_bytes += $bytes;
+                        $entry = [
+                            'path' => $path,
+                            'success' => true,
+                            'bytes_written' => $bytes,
+                        ];
+                        if ($backup_name) {
+                            $entry['backup'] = $backup_name;
+                        }
+                        $results[] = $entry;
+                    }
+                }
+
+                return [
+                    'success' => ($failed === 0),
+                    'total_files' => count($normalized_files),
+                    'successful' => $successful,
+                    'failed' => $failed,
+                    'total_bytes_written' => $total_bytes,
+                    'files' => $results,
+                ];
+            },
+            'permission_callback' => function () {
+                return current_user_can('manage_options');
+            },
+            'input_schema' => [
+                'type' => 'object',
+                'properties' => [
+                    'files' => [
+                        'type' => 'array',
+                        'description' => 'List of files to create or overwrite.',
+                        'items' => [
+                            'type' => 'object',
+                            'properties' => [
+                                'path' => ['type' => 'string', 'description' => 'Absolute path inside wp-content to write.'],
+                                'content' => ['type' => 'string', 'description' => 'Complete content to write into the file.']
+                            ],
+                            'required' => ['path', 'content']
+                        ]
+                    ],
+                    'create_backup' => [
+                        'type' => 'boolean',
+                        'default' => false,
+                        'description' => 'Whether to create a timestamped .bak backup of existing files before overwriting.'
+                    ],
+                    'atomic' => [
+                        'type' => 'boolean',
+                        'default' => false,
+                        'description' => 'If true, verifies path permissions for all files before making any modifications.'
+                    ]
+                ],
+                'required' => ['files']
             ]
         ]);
     }

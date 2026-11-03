@@ -22,6 +22,22 @@ define('AIUTOMA_DEV_VERSION', '1.0.0');
 define('AIUTOMA_DEV_PATH', plugin_dir_path(__FILE__));
 define('AIUTOMA_DEV_URL', plugin_dir_url(__FILE__));
 
+// Load Composer autoloader if available
+if (file_exists(AIUTOMA_DEV_PATH . 'vendor/autoload.php')) {
+    require_once AIUTOMA_DEV_PATH . 'vendor/autoload.php';
+}
+
+// Initialize GitHub Auto-Update Checker
+if (class_exists('\YahnisElsts\PluginUpdateChecker\v5\PucFactory')) {
+    $aiutoma_dev_updater = \YahnisElsts\PluginUpdateChecker\v5\PucFactory::buildUpdateChecker(
+        'https://github.com/frafish/aiutoma-dev/',
+        __FILE__,
+        'aiutoma-dev'
+    );
+    // Enable release assets to download the compiled zip package from GitHub Releases
+    $aiutoma_dev_updater->getVcsApi()->enableReleaseAssets();
+}
+
 // Require helper files
 require_once AIUTOMA_DEV_PATH . 'includes/change-recorder.php';
 require_once AIUTOMA_DEV_PATH . 'includes/developer-abilities.php';
